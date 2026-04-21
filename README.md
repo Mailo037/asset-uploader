@@ -1,26 +1,22 @@
 # Roblox Creator Store Uploader
 
-Automatisches Upload-Tool für Images/Icons auf den Roblox Creator Store,
-mit integrierter Pixelfix-Vorverarbeitung.
+Automatic upload tool for Images, Decals, Audio, and Models to the Roblox Creator Store, featuring integrated **Pixelfix** preprocessing.
 
 ---
 
-## Setup
+## 🛠 Setup
 
-## Setup
-
+### 1. Install Dependencies
 ```bash
 pip install requests rich python-dotenv watchdog
 ```
+> [!TIP]
+> `requests`, `rich`, `python-dotenv`, and `watchdog` are recommended. Without them, the scripts will run with limited functionality using standard library fallbacks.
 
-`requests`, `rich`, `python-dotenv` und `watchdog` sind empfohlen. Ohne sie laufen die Scripte mit eingeschränkter Funktionalität (stdlib Fallbacks).
+### 2. Configuration (`.env`)
+You can save your configuration in a `.env` file in the main directory so you don't have to enter it every time you run the tools.
 
-### Konfiguration (.env)
-
-Du kannst deine Konfiguration in einer `.env` Datei im Hauptverzeichnis speichern, damit du sie nicht jedes Mal beim Ausführen angeben musst.
-
-Erstelle eine Datei namens `.env`:
-
+Create a file named `.env`:
 ```env
 ROBLOX_API_KEY=your_api_key_here
 USER_ID=12345678
@@ -28,125 +24,63 @@ GROUP_ID=
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ```
 
-1. Öffne [create.roblox.com/credentials](https://create.roblox.com/dashboard/credentials)
-2. Erstelle einen API Key mit Permission: **Assets API** → `asset:read`, `asset:write`.
+### 3. API Key Setup
+1. Open [create.roblox.com/dashboard/credentials](https://create.roblox.com/dashboard/credentials)
+2. Create an API Key with Permissions: **Assets API** → `asset:read`, `asset:write`.
 
 ---
 
-## Benutzung
+## 🖥 Graphical User Interface (GUI)
+> [!NOTE]
+> *Development in progress.* A sleek Tkinter-based GUI allows you to select paths, choose the Asset Type, and toggle options without using the command line.
 
-### Einzelne Datei
+To start the GUI:
 ```bash
-python uploader.py --user-id 12345 icon.png
+python gui.py
+```
+*Note: Any credentials saved in your `.env` file will automatically be loaded into the GUI.*
+
+---
+
+## ⌨ CLI Usage
+
+### Single File
+```bash
+python uploader.py --user-id 12345 --asset-type Decal icon.png
 ```
 
-### Ganzer Ordner
+### Entire Folder
 ```bash
-python uploader.py --user-id 12345 ./icons/
+python uploader.py --user-id 12345 --asset-type Image ./icons/
 ```
 
-### Mit Manifest (individuelle Namen/Beschreibungen pro Asset)
+### With Manifest (Individual names/descriptions per asset)
 ```bash
 python uploader.py --user-id 12345 --manifest manifest.example.json
 ```
 
-### Für eine Gruppe hochladen
+### Upload for a Group
 ```bash
-python uploader.py --group-id 9876 ./icons/
-```
-
-### Creator Store Distribution aktivieren
-```bash
-python uploader.py --user-id 12345 --distribute ./icons/
-```
-> **Hinweis:** Das finale Freischalten im Marketplace (Preis = 0, Tags, Thumbnail)
-> muss einmalig auf [create.roblox.com](https://create.roblox.com) gemacht werden.
-> Der `--distribute` Flag bereitet das Asset API-seitig vor.
-
-### Pixelfix überspringen
-```bash
-python uploader.py --user-id 12345 --no-pixelfix ./icons/
-```
-
-### Dry Run (ohne echten Upload)
-```bash
-python uploader.py --user-id 12345 --dry-run ./icons/
-```
-
-### Ergebnisse als JSON speichern
-```bash
-python uploader.py --user-id 12345 --results results.json ./icons/
+python uploader.py --group-id 9876543 ./assets/
 ```
 
 ---
 
-## Pixelfix
+## CLI Arguments (`uploader.py`)
 
-[Pixelfix (TransparentPixelFix)](https://github.com/Corecii/Transparent-Pixel-Fix)
-wird automatisch in `tools/TransparentPixelFix.exe` heruntergeladen, wenn es fehlt.
-
-- Nur auf **Windows** verfügbar
-- Wird nur auf `.png`-Dateien angewendet
-- Auf anderen Betriebssystemen wird der Schritt übersprungen
-
-Was Pixelfix macht: Es setzt die RGB-Werte von vollständig transparenten Pixeln auf
-die nächstgelegene sichtbare Farbe. Ohne das Farb-Bleeding bei Roblox-Decals und
-in GUIs mit `ImageLabel`/`ImageButton`.
-
----
-
-## Deduplication
-
-Bereits hochgeladene Dateien werden via SHA-256-Hash erkannt und übersprungen.
-History wird in `upload_history.json` gespeichert.
-
-Mit `--no-dedup` deaktivieren.
-
----
-
-## Manifest Format
-
-```json
-[
-  {
-    "file": "icons/sword.png",
-    "name": "Sharp Sword Icon",
-    "description": "A clean 256x256 sword icon."
-  }
-]
-```
-
----
-
-## Alle CLI-Optionen
-
-| Flag             | Beschreibung                                          |
-|------------------|-------------------------------------------------------|
-| `--key`          | Roblox API Key (oder `ROBLOX_API_KEY` env var)       |
-| `--user-id`      | Upload als User                                       |
-| `--group-id`     | Upload als Group                                      |
-| `--manifest`     | JSON-Manifest mit Asset-Metadaten                     |
-| `--name`         | Anzeigename (nur bei Einzeldatei)                     |
-| `--description`  | Standard-Beschreibung                                 |
-| `--no-pixelfix`  | Pixelfix überspringen                                 |
-| `--no-dedup`     | Bereits hochgeladene erneut hochladen                 |
-| `--distribute`   | Creator Store Distribution konfigurieren              |
-| `--dry-run`      | Simulieren ohne echten Upload                         |
-| `--delay`        | Pause zwischen Uploads in Sekunden (Standard: 1.2)    |
-| `--results`      | Ergebnisse als JSON speichern                         |
-
----
-
-## Ideen für Erweiterungen
-
-- **Auto-Resize**: Bilder vor dem Upload auf Roblox-konforme Größen skalieren
-  (512×512, 1024×1024) mit Pillow
-- **Thumbnail-Generator**: Automatisch Vorschaubilder für den Creator Store generieren
-- **Tag-System**: Tags aus Dateinamen oder Manifest extrahieren und setzen
-- **Watch Mode**: Ordner überwachen und neue Dateien automatisch hochladen (`watchdog`)
-- **GUI**: Tkinter oder PyQt6 Drag & Drop Interface
-- **CI/CD Integration**: GitHub Actions Workflow für automatische Uploads bei Commits
-- **Roblox Studio Plugin**: Direkter Upload aus Studio heraus via Companion Script
-- **Sprite Sheet Splitter**: Automatisch Sprite Sheets in Einzelbilder aufteilen und
-  als Collection hochladen
-- **Discord Webhook**: Nach erfolgreichen Uploads eine Benachrichtigung posten
+| Argument | Description |
+| :--- | :--- |
+| `target` | File or folder path to upload (Required) |
+| `--key` | Roblox API Key (or `ROBLOX_API_KEY` env var) |
+| `--user-id` | Upload as User ID |
+| `--group-id` | Upload as Group ID |
+| `--asset-type` | Asset type to create (e.g., Decal, Image, Model) |
+| `--manifest` | JSON manifest with asset metadata |
+| `--name` | Display name (only for single file uploads) |
+| `--description` | Default description |
+| `--no-pixelfix` | Skip the Pixelfix step |
+| `--no-dedup` | Force upload even if already uploaded |
+| `--distribute` | Configure Creator Store Distribution |
+| `--dry-run` | Simulate without actually uploading |
+| `--delay` | Pause between uploads in seconds (Default: 1.2) |
+| `--results` | Save results as JSON |

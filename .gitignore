@@ -2,5 +2,6 @@
 __pycache__/
 *.pyc
 upload_history.json
-tools/TransparentPixelFix.exe
+tools/
 pixelfix_out/
+watch_dir/

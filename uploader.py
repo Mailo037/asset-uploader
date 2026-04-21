@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Roblox Creator Store Image Uploader
-Preprocesses images with Pixelfix, then uploads to Roblox via Open Cloud API.
-"""
-
 import os
 import sys
 import json
@@ -15,28 +10,25 @@ import argparse
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Set
 import mimetypes
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
-
-# ── Optional rich output ──────────────────────────────────────────────────────
+# -- Optional rich output ------------------------------------------------------
 try:
     from rich.console import Console
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
-    from rich.table import Table
     from rich.panel import Panel
+    from rich.markup import escape
     from rich import print as rprint
     RICH = True
     console = Console()
 except ImportError:
     RICH = False
+    def escape(text): return str(text)
     class Console:
         def print(self, *a, **kw): print(*a)
-        def rule(self, *a, **kw): print("─" * 60)
         def log(self, *a, **kw): print("[LOG]", *a)
     console = Console()
     def rprint(*a, **kw): print(*a)
@@ -48,25 +40,25 @@ except ImportError:
     HAS_REQUESTS = False
     import urllib.request as urlreq
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-PIXELFIX_URL = "https://github.com/Corecii/Transparent-Pixel-Fix/releases/download/1.0.0/TransparentPixelFix.exe"
-PIXELFIX_BIN = Path(__file__).parent / "tools" / "TransparentPixelFix.exe"
+# -- Constants -----------------------------------------------------------------
+PIXELFIX_URL = "https://github.com/Corecii/Transparent-Pixel-Fix/releases/download/1.0.0/pixelfix-win-x64.exe"
+PIXELFIX_BIN = Path(__file__).parent / "tools" / "pixelfix-win-x64.exe"
 ROBLOX_ASSETS_API = "https://apis.roblox.com/assets/v1/assets"
 ROBLOX_OPS_API    = "https://apis.roblox.com/assets/v1/operations/{op_id}"
 HISTORY_FILE      = Path(__file__).parent / "upload_history.json"
-SUPPORTED_EXT     = {".png", ".jpg", ".jpeg", ".bmp", ".tga"}
+SUPPORTED_EXT     = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".mp3", ".ogg", ".wav", ".fbx", ".obj"}
 RATE_LIMIT_DELAY  = 1.2   # seconds between uploads (stay under Roblox limits)
 MAX_POLL_ATTEMPTS = 30
 POLL_INTERVAL     = 2.0   # seconds between operation polls
 
-# ── History (deduplication) ───────────────────────────────────────────────────
-def load_history() -> dict:
+# -- History (deduplication) ---------------------------------------------------
+def load_history() -> Dict:
     if HISTORY_FILE.exists():
         with open(HISTORY_FILE) as f:
             return json.load(f)
     return {}
 
-def save_history(history: dict):
+def save_history(history: Dict):
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f, indent=2)
@@ -78,38 +70,33 @@ def file_hash(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-# ── Pixelfix ──────────────────────────────────────────────────────────────────
+# -- Pixelfix ------------------------------------------------------------------
 def download_pixelfix():
     """Download Pixelfix binary if not present (Windows only)."""
     if platform.system() != "Windows":
         return False
     if PIXELFIX_BIN.exists():
         return True
-    console.print("[yellow]⬇  Downloading Pixelfix...[/yellow]" if RICH else "Downloading Pixelfix...")
+    
+    # Use standard print to avoid any unicode issues in CMD
+    print("Downloading Pixelfix...")
     PIXELFIX_BIN.parent.mkdir(parents=True, exist_ok=True)
     try:
         urllib.request.urlretrieve(PIXELFIX_URL, PIXELFIX_BIN)
-        console.print("[green]✓ Pixelfix downloaded.[/green]" if RICH else "Pixelfix downloaded.")
+        print("[OK] Pixelfix downloaded successfully.")
         return True
     except Exception as e:
-        console.print(f"[red]✗ Could not download Pixelfix: {e}[/red]" if RICH else f"ERROR: {e}")
+        print(f"[ERROR] Could not download Pixelfix: {e}")
         return False
 
 def run_pixelfix(image_path: Path, output_path: Optional[Path] = None) -> Path:
-    """
-    Run Pixelfix on a PNG image.
-    Returns the path to the processed image.
-    On non-Windows or if Pixelfix is missing, returns the original path with a warning.
-    """
     if platform.system() != "Windows":
-        console.print(f"[yellow]⚠ Pixelfix is Windows-only. Skipping for {image_path.name}[/yellow]" if RICH
-                      else f"SKIP Pixelfix (non-Windows): {image_path.name}")
+        print(f"[SKIP] Pixelfix is Windows-only. Skipping for {image_path.name}")
         return image_path
 
     if not PIXELFIX_BIN.exists():
         if not download_pixelfix():
-            console.print(f"[yellow]⚠ Pixelfix unavailable. Uploading original.[/yellow]" if RICH
-                          else "WARNING: Pixelfix unavailable.")
+            print(f"[WARN] Pixelfix unavailable. Uploading original.")
             return image_path
 
     if output_path is None:
@@ -121,14 +108,13 @@ def run_pixelfix(image_path: Path, output_path: Optional[Path] = None) -> Path:
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        console.print(f"[yellow]⚠ Pixelfix error for {image_path.name}: {result.stderr}[/yellow]" if RICH
-                      else f"Pixelfix error: {result.stderr}")
+        print(f"[WARN] Pixelfix error for {image_path.name}: {result.stderr}")
         return image_path
 
     return output_path
 
-# ── Roblox API ────────────────────────────────────────────────────────────────
-def make_headers(api_key: str) -> dict:
+# -- Roblox API ----------------------------------------------------------------
+def make_headers(api_key: str) -> Dict:
     return {"x-api-key": api_key}
 
 def upload_asset(
@@ -138,14 +124,15 @@ def upload_asset(
     description: str,
     creator_type: str,   # "user" or "group"
     creator_id: str,
-) -> dict:
-    """
-    Upload an image to Roblox via Open Cloud Assets API.
-    Returns the operation response dict.
-    """
-    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+    asset_type: str = "Decal",
+) -> Dict:
+    mime = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+    
+    if mime == "application/octet-stream" and image_path.suffix.lower() in {".fbx", ".obj"}:
+        mime = "model/" + image_path.suffix.lower()[1:]
+
     request_body = {
-        "assetType": "Decal",
+        "assetType": asset_type,
         "displayName": display_name,
         "description": description,
         "creationContext": {
@@ -166,12 +153,7 @@ def upload_asset(
         resp.raise_for_status()
         return resp.json()
     else:
-        # Fallback: manual multipart with urllib
         import io, email.generator
-        from email.mime.multipart import MIMEMultipart
-        from email.mime.application import MIMEApplication
-        from email.mime.text import MIMEText
-
         boundary = "----RobloxUploaderBoundary"
         body_parts = []
         body_parts.append(
@@ -201,11 +183,7 @@ def upload_asset(
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read())
 
-def poll_operation(api_key: str, operation_path: str) -> Optional[dict]:
-    """
-    Poll an async Roblox operation until it completes or fails.
-    `operation_path` is the `path` field from the upload response, e.g. "operations/abc123"
-    """
+def poll_operation(api_key: str, operation_path: str) -> Optional[Dict]:
     url = f"https://apis.roblox.com/assets/v1/{operation_path}"
     for attempt in range(MAX_POLL_ATTEMPTS):
         time.sleep(POLL_INTERVAL)
@@ -226,38 +204,24 @@ def poll_operation(api_key: str, operation_path: str) -> Optional[dict]:
     raise TimeoutError(f"Operation did not complete after {MAX_POLL_ATTEMPTS} attempts.")
 
 def set_creator_store_free(api_key: str, asset_id: str):
-    """
-    Attempts to make the uploaded asset freely available on the Creator Store.
-    NOTE: Full marketplace listing (price, tags) still requires manual setup on
-    create.roblox.com > Creations > [Asset] > Marketplace.
-    This call configures the asset metadata to allow distribution.
-    """
     url = f"https://apis.roblox.com/assets/v1/assets/{asset_id}"
-    payload = {
-        "previews": [],   # Add preview URLs if desired
-    }
+    payload = {"previews": []}
     if HAS_REQUESTS:
         resp = requests.patch(
             url,
             headers={**make_headers(api_key), "Content-Type": "application/json"},
             json=payload
         )
-        # Non-fatal: might 400 on assets that don't support marketplace listing via API
         if resp.status_code not in (200, 204):
-            console.print(f"[yellow]ℹ Creator Store config returned {resp.status_code} – finish on create.roblox.com[/yellow]"
-                          if RICH else f"INFO: Creator Store needs manual setup (HTTP {resp.status_code})")
+            print(f"[INFO] Creator Store needs manual setup (HTTP {resp.status_code})")
 
-# ── Manifest loading ──────────────────────────────────────────────────────────
-def load_manifest(manifest_path: Path) -> list[dict]:
-    """
-    Load a manifest JSON file.
-    Each entry: { "file": "icon.png", "name": "My Icon", "description": "...", "tags": [] }
-    """
+# -- Manifest loading ----------------------------------------------------------
+def load_manifest(manifest_path: Path) -> List[Dict]:
     with open(manifest_path) as f:
         data = json.load(f)
     return data if isinstance(data, list) else data.get("assets", [])
 
-# ── Core upload logic ─────────────────────────────────────────────────────────
+# -- Core upload logic ---------------------------------------------------------
 def process_and_upload(
     image_path: Path,
     api_key: str,
@@ -269,61 +233,51 @@ def process_and_upload(
     skip_dedup: bool,
     distribute: bool,
     dry_run: bool,
-) -> Optional[dict]:
-    """Full pipeline: Pixelfix → upload → poll → (optionally) distribute."""
+    asset_type: str = "Decal",
+) -> Optional[Dict]:
 
     history = load_history()
 
-    # Deduplication
     if not skip_dedup:
         h = file_hash(image_path)
         if h in history:
             prev = history[h]
-            console.print(f"[dim]⏭  Skipping {image_path.name} (already uploaded as assetId={prev['assetId']})[/dim]"
-                          if RICH else f"SKIP (duplicate): {image_path.name}")
+            print(f"  [SKIP] {image_path.name} (already uploaded as assetId={prev['assetId']})")
             return prev
 
     name = display_name or image_path.stem.replace("_", " ").replace("-", " ").title()
 
-    # Pixelfix
     processed = image_path
     if not skip_pixelfix and image_path.suffix.lower() == ".png":
-        console.print(f"  [cyan]→ Running Pixelfix...[/cyan]" if RICH else "  Running Pixelfix...")
+        print(f"  -> Running Pixelfix...")
         processed = run_pixelfix(image_path)
 
     if dry_run:
-        console.print(f"  [dim][DRY RUN] Would upload '{name}' from {processed}[/dim]" if RICH
-                      else f"  [DRY RUN] {name} <- {processed}")
+        print(f"  [DRY RUN] Would upload '{name}' from {processed}")
         return {"dryRun": True, "file": str(image_path), "name": name}
 
-    # Upload
-    console.print(f"  [cyan]→ Uploading '{name}'...[/cyan]" if RICH else f"  Uploading '{name}'...")
-    op = upload_asset(api_key, processed, name, description, creator_type, creator_id)
+    print(f"  -> Uploading '{name}' as {asset_type}...")
+    op = upload_asset(api_key, processed, name, description, creator_type, creator_id, asset_type)
 
-    # Poll operation
     op_path = op.get("path") or op.get("operationId")
     if op_path:
-        console.print(f"  [cyan]→ Waiting for operation {op_path}...[/cyan]" if RICH else f"  Polling operation...")
+        print(f"  -> Polling operation...")
         result = poll_operation(api_key, op_path)
     else:
-        result = op  # Synchronous response (older API behaviour)
+        result = op
 
     asset_id = (
         result.get("assetId")
-        or result.get("assetVersionId")  # fallback
+        or result.get("assetVersionId") 
         or result.get("id")
     )
     if not asset_id:
-        console.print(f"  [yellow]⚠ Could not extract assetId from response: {result}[/yellow]" if RICH
-                      else f"  WARNING: no assetId in response")
+        print(f"  [WARN] No assetId in response")
 
-    # Creator Store distribution
     if distribute and asset_id:
-        console.print(f"  [cyan]→ Configuring Creator Store distribution...[/cyan]" if RICH
-                      else "  Configuring Creator Store...")
+        print("  -> Configuring Creator Store...")
         set_creator_store_free(api_key, str(asset_id))
 
-    # Save to history
     record = {
         "assetId": asset_id,
         "name": name,
@@ -336,71 +290,43 @@ def process_and_upload(
         history[h] = record
         save_history(history)
 
-    console.print(f"  [green]✓ Done → assetId={asset_id}[/green]" if RICH else f"  OK: assetId={asset_id}")
+    print(f"  [OK] Done -> assetId={asset_id}")
     return record
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# -- CLI -----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="roblox_uploader",
-        description="Upload images to the Roblox Creator Store with Pixelfix preprocessing.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Upload single file
-  python uploader.py --key YOUR_KEY --user-id 12345 image.png
-
-  # Upload entire folder
-  python uploader.py --key YOUR_KEY --user-id 12345 ./icons/
-
-  # Upload via manifest (custom names/descriptions per file)
-  python uploader.py --key YOUR_KEY --user-id 12345 --manifest manifest.json
-
-  # Upload for a group, skip Pixelfix, dry run first
-  python uploader.py --key YOUR_KEY --group-id 9876 --no-pixelfix --dry-run ./icons/
-
-  # Auto-distribute on Creator Store
-  python uploader.py --key YOUR_KEY --user-id 12345 --distribute ./icons/
-        """
+        description="Upload assets to the Roblox Creator Store with Pixelfix preprocessing.",
     )
-    # Auth
     auth = p.add_argument_group("Authentication")
-    auth.add_argument("--key", metavar="API_KEY", default=os.environ.get("ROBLOX_API_KEY"),
-                      help="Roblox Open Cloud API key (or set ROBLOX_API_KEY env var)")
+    auth.add_argument("--key", metavar="API_KEY", default=os.environ.get("ROBLOX_API_KEY"))
     creator = auth.add_mutually_exclusive_group()
-    creator.add_argument("--user-id", metavar="ID", default=os.environ.get("USER_ID"),
-                      help="Upload as a user (or set USER_ID env var)")
-    creator.add_argument("--group-id", metavar="ID", default=os.environ.get("GROUP_ID"),
-                      help="Upload as a group (or set GROUP_ID env var)")
+    creator.add_argument("--user-id", metavar="ID", default=os.environ.get("USER_ID"))
+    creator.add_argument("--group-id", metavar="ID", default=os.environ.get("GROUP_ID"))
 
-    # Input
     inp = p.add_argument_group("Input")
-    inp.add_argument("input", nargs="*", help="Image file(s) or folder(s)")
-    inp.add_argument("--manifest", metavar="FILE", help="JSON manifest with per-asset metadata")
+    inp.add_argument("input", nargs="*")
+    inp.add_argument("--manifest", metavar="FILE")
 
-    # Metadata
     meta = p.add_argument_group("Metadata")
-    meta.add_argument("--name", metavar="NAME", help="Display name (single file only)")
-    meta.add_argument("--description", metavar="TEXT", default="Uploaded by roblox_uploader",
-                      help="Default asset description")
+    meta.add_argument("--asset-type", default="Decal")
+    meta.add_argument("--name", metavar="NAME")
+    meta.add_argument("--description", metavar="TEXT", default="Uploaded by roblox_uploader")
 
-    # Behaviour
     beh = p.add_argument_group("Behaviour")
-    beh.add_argument("--no-pixelfix", action="store_true", help="Skip Pixelfix preprocessing")
-    beh.add_argument("--no-dedup", action="store_true", help="Upload even if already in history")
-    beh.add_argument("--distribute", action="store_true",
-                     help="Configure asset for Creator Store distribution after upload")
-    beh.add_argument("--dry-run", action="store_true", help="Simulate upload without actually uploading")
-    beh.add_argument("--delay", type=float, default=RATE_LIMIT_DELAY, metavar="SECS",
-                     help=f"Delay between uploads in seconds (default: {RATE_LIMIT_DELAY})")
+    beh.add_argument("--no-pixelfix", action="store_true")
+    beh.add_argument("--no-dedup", action="store_true")
+    beh.add_argument("--distribute", action="store_true")
+    beh.add_argument("--dry-run", action="store_true")
+    beh.add_argument("--delay", type=float, default=RATE_LIMIT_DELAY)
 
-    # Output
     out = p.add_argument_group("Output")
-    out.add_argument("--results", metavar="FILE", help="Write upload results to a JSON file")
+    out.add_argument("--results", metavar="FILE")
 
     return p
 
-def collect_images(inputs: list) -> list[Path]:
+def collect_images(inputs: List[str]) -> List[Path]:
     images = []
     for inp in inputs:
         p = Path(inp)
@@ -411,9 +337,8 @@ def collect_images(inputs: list) -> list[Path]:
         elif p.is_file() and p.suffix.lower() in SUPPORTED_EXT:
             images.append(p)
         else:
-            console.print(f"[yellow]⚠ Skipping unsupported input: {inp}[/yellow]" if RICH
-                          else f"WARNING: skipping {inp}")
-    # Deduplicate while preserving order
+            print(f"[WARN] Skipping unsupported input: {inp}")
+            
     seen = set()
     result = []
     for p in images:
@@ -427,7 +352,6 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # ── Validation ────────────────────────────────────────────────────────────
     if not args.key:
         parser.error("--key or ROBLOX_API_KEY env var required.")
     if not args.user_id and not args.group_id:
@@ -438,18 +362,14 @@ def main():
     creator_type = "user" if args.user_id else "group"
     creator_id   = args.user_id or args.group_id
 
-    if RICH:
-        console.print(Panel.fit(
-            f"[bold]Roblox Creator Store Uploader[/bold]\n"
-            f"Creator: {creator_type} {creator_id}  |  "
-            f"Pixelfix: {'OFF' if args.no_pixelfix else 'ON'}  |  "
-            f"Distribute: {'YES' if args.distribute else 'NO'}  |  "
-            f"Dry run: {'YES' if args.dry_run else 'NO'}",
-            border_style="cyan"
-        ))
+    print("\n============================================================")
+    print("ROBLOX CREATOR STORE UPLOADER")
+    print("============================================================")
+    print(f"Creator: {creator_type} {creator_id} | Type: {args.asset_type}")
+    print(f"Pixelfix: {'OFF' if args.no_pixelfix else 'ON'} | Dry run: {'YES' if args.dry_run else 'NO'}")
+    print("============================================================\n")
 
-    # ── Collect assets ────────────────────────────────────────────────────────
-    tasks: list[dict] = []
+    tasks: List[Dict] = []
 
     if args.manifest:
         entries = load_manifest(Path(args.manifest))
@@ -463,7 +383,7 @@ def main():
     else:
         images = collect_images(args.input)
         if not images:
-            console.print("[red]No supported images found.[/red]" if RICH else "ERROR: no images found.")
+            print("[ERROR] No supported files found.")
             sys.exit(1)
         for img in images:
             tasks.append({
@@ -472,19 +392,17 @@ def main():
                 "description": args.description,
             })
 
-    console.print(f"[bold]{len(tasks)} image(s) queued.[/bold]\n" if RICH else f"{len(tasks)} image(s) queued.")
+    print(f"{len(tasks)} file(s) queued.\n")
 
-    # ── Auto-download Pixelfix ────────────────────────────────────────────────
     if not args.no_pixelfix and platform.system() == "Windows":
         download_pixelfix()
 
-    # ── Upload loop ───────────────────────────────────────────────────────────
     results = []
     failed  = []
 
     for i, task in enumerate(tasks, 1):
         path = task["path"]
-        console.print(f"[bold][{i}/{len(tasks)}][/bold] {path.name}" if RICH else f"[{i}/{len(tasks)}] {path.name}")
+        print(f"[{i}/{len(tasks)}] {path.name}")
 
         try:
             record = process_and_upload(
@@ -498,40 +416,40 @@ def main():
                 skip_dedup   = args.no_dedup,
                 distribute   = args.distribute,
                 dry_run      = args.dry_run,
+                asset_type   = args.asset_type,
             )
             if record:
                 results.append(record)
         except Exception as e:
-            console.print(f"  [red]✗ Error: {e}[/red]" if RICH else f"  ERROR: {e}")
+            print(f"  [ERROR] {e}")
             failed.append({"file": str(path), "error": str(e)})
 
         if i < len(tasks):
             time.sleep(args.delay)
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    if RICH:
-        console.rule()
-        table = Table(title="Upload Summary", show_lines=True)
-        table.add_column("File", style="cyan", no_wrap=True)
-        table.add_column("Asset ID", style="green")
-        table.add_column("Status")
-        for r in results:
-            status = "[yellow]DRY RUN[/yellow]" if r.get("dryRun") else "[green]✓ OK[/green]"
-            asset_id = str(r.get("assetId", "—"))
-            table.add_row(Path(r.get("file", "?")).name, asset_id, status)
-        for f in failed:
-            table.add_row(Path(f["file"]).name, "—", f"[red]✗ {f['error'][:50]}[/red]")
-        console.print(table)
-    else:
-        print(f"\n{'='*60}")
-        print(f"Done: {len(results)} uploaded, {len(failed)} failed.")
+    # Completely safe ASCII table - no more Unicode Encode Errors!
+    print(f"\n{'='*60}")
+    print("UPLOAD SUMMARY")
+    print(f"{'='*60}")
+    
+    for r in results:
+        status = "[DRY RUN]" if r.get("dryRun") else "[OK]"
+        asset_id = str(r.get("assetId", "-"))
+        filename = Path(r.get("file", "?")).name
+        print(f"{status} | {asset_id:<15} | {filename}")
+        
+    for f in failed:
+        filename = Path(f["file"]).name
+        print(f"[FAILED] | {'-':<15} | {filename} ({f['error'][:40]})")
+        
+    print(f"{'='*60}")
+    print(f"Done: {len(results)} uploaded, {len(failed)} failed.")
 
-    # ── Write results file ────────────────────────────────────────────────────
     if args.results:
         out = {"uploaded": results, "failed": failed}
         with open(args.results, "w") as f:
             json.dump(out, f, indent=2)
-        console.print(f"[dim]Results written to {args.results}[/dim]" if RICH else f"Results → {args.results}")
+        print(f"Results written to -> {args.results}")
 
     if failed:
         sys.exit(1)
