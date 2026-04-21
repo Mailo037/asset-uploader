@@ -9,6 +9,7 @@ import subprocess
 import argparse
 import urllib.request
 import urllib.error
+import shutil
 from pathlib import Path
 from typing import Optional, List, Dict, Set
 import mimetypes
@@ -40,6 +41,14 @@ except ImportError:
     HAS_REQUESTS = False
     import urllib.request as urlreq
 
+# -- Optional Pillow for Metadata Extraction -----------------------------------
+try:
+    from PIL import Image
+    from PIL.ExifTags import TAGS
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
+
 # -- Constants -----------------------------------------------------------------
 PIXELFIX_URL = "https://github.com/Corecii/Transparent-Pixel-Fix/releases/download/1.0.0/pixelfix-win-x64.exe"
 PIXELFIX_BIN = Path(__file__).parent / "tools" / "pixelfix-win-x64.exe"
@@ -70,6 +79,46 @@ def file_hash(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+# -- Metadata Extraction -------------------------------------------------------
+def get_image_comment(image_path: Path) -> Optional[str]:
+    """
+    Attempts to extract metadata comments or descriptions from the image.
+    Works for PNG chunks and JPG EXIF data.
+    """
+    if not HAS_PILLOW or image_path.suffix.lower() not in {'.png', '.jpg', '.jpeg'}:
+        return None
+        
+    try:
+        with Image.open(image_path) as img:
+            # 1. Try PNG Text Infos (tEXt, iTXt, zTXt chunks)
+            if hasattr(img, 'text') and img.text:
+                for key in ['Comment', 'Description', 'Title', 'UserComment']:
+                    if key in img.text:
+                        return str(img.text[key]).strip()
+            
+            if 'Comment' in img.info:
+                return str(img.info['Comment']).strip()
+            if 'Description' in img.info:
+                return str(img.info['Description']).strip()
+
+            # 2. Try JPG EXIF Data
+            exif = img.getexif()
+            if exif:
+                # 37510 = UserComment, 270 = ImageDescription
+                for tag_id in [37510, 270]:
+                    val = exif.get(tag_id)
+                    if val:
+                        # Clean up EXIF-Prefixes (like ASCII\0\0\0)
+                        if isinstance(val, bytes):
+                            val = val.decode('utf-8', errors='ignore')
+                        val_str = str(val).replace('ASCII\x00\x00\x00', '').replace('\x00', '').strip()
+                        if val_str:
+                            return val_str
+    except Exception as e:
+        print(f"  [WARN] Could not read metadata from {image_path.name}: {e}")
+        
+    return None
+
 # -- Pixelfix ------------------------------------------------------------------
 def download_pixelfix():
     """Download Pixelfix binary if not present (Windows only)."""
@@ -78,7 +127,6 @@ def download_pixelfix():
     if PIXELFIX_BIN.exists():
         return True
     
-    # Use standard print to avoid any unicode issues in CMD
     print("Downloading Pixelfix...")
     PIXELFIX_BIN.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -91,24 +139,39 @@ def download_pixelfix():
 
 def run_pixelfix(image_path: Path, output_path: Optional[Path] = None) -> Path:
     if platform.system() != "Windows":
-        print(f"[SKIP] Pixelfix is Windows-only. Skipping for {image_path.name}")
+        print(f"  [SKIP] Pixelfix is Windows-only. Skipping for {image_path.name}")
         return image_path
 
     if not PIXELFIX_BIN.exists():
         if not download_pixelfix():
-            print(f"[WARN] Pixelfix unavailable. Uploading original.")
+            print(f"  [WARN] Pixelfix unavailable. Uploading original.")
             return image_path
 
     if output_path is None:
         output_path = image_path.parent / "pixelfix_out" / image_path.name
+    
+    # Ensure the output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 1. Copy the original file to the output path to prevent overwriting the original file
+    try:
+        shutil.copy2(image_path, output_path)
+    except Exception as e:
+        print(f"  [ERROR] Could not copy file for Pixelfix: {e}")
+        return image_path
+
+    # 2. Run Pixelfix ONLY on the copied file (Pixelfix overwrites files in-place)
     result = subprocess.run(
-        [str(PIXELFIX_BIN), str(image_path), str(output_path)],
+        [str(PIXELFIX_BIN), str(output_path)],
         capture_output=True, text=True
     )
-    if result.returncode != 0:
-        print(f"[WARN] Pixelfix error for {image_path.name}: {result.stderr}")
+    
+    # SAFETY CHECK: Did Pixelfix actually succeed?
+    if result.returncode != 0 or not output_path.exists():
+        print(f"  [WARN] Pixelfix failed on {image_path.name}. Uploading original file instead.")
+        # Clean up the corrupted copy if it exists
+        if output_path.exists():
+            output_path.unlink()
         return image_path
 
     return output_path
@@ -247,6 +310,12 @@ def process_and_upload(
 
     name = display_name or image_path.stem.replace("_", " ").replace("-", " ").title()
 
+    # --- Fetch Metadata Comment ---
+    extracted_comment = get_image_comment(image_path)
+    if extracted_comment:
+        description = extracted_comment
+        print(f"  [INFO] Found metadata comment: '{description}'")
+
     processed = image_path
     if not skip_pixelfix and image_path.suffix.lower() == ".png":
         print(f"  -> Running Pixelfix...")
@@ -367,6 +436,7 @@ def main():
     print("============================================================")
     print(f"Creator: {creator_type} {creator_id} | Type: {args.asset_type}")
     print(f"Pixelfix: {'OFF' if args.no_pixelfix else 'ON'} | Dry run: {'YES' if args.dry_run else 'NO'}")
+    print(f"Metadata Extract: {'[ON]' if HAS_PILLOW else '[OFF] (pip install Pillow for metadata support)'}")
     print("============================================================\n")
 
     tasks: List[Dict] = []
@@ -427,7 +497,6 @@ def main():
         if i < len(tasks):
             time.sleep(args.delay)
 
-    # Completely safe ASCII table - no more Unicode Encode Errors!
     print(f"\n{'='*60}")
     print("UPLOAD SUMMARY")
     print(f"{'='*60}")
