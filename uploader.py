@@ -41,7 +41,7 @@ except ImportError:
     HAS_REQUESTS = False
     import urllib.request as urlreq
 
-# -- Optional Pillow for Metadata Extraction -----------------------------------
+# -- Optional Pillow for Metadata Extraction & Transparency Check ----------------
 try:
     from PIL import Image
     from PIL.ExifTags import TAGS
@@ -59,6 +59,7 @@ SUPPORTED_EXT     = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".mp3", ".ogg", ".
 RATE_LIMIT_DELAY  = 1.2   # seconds between uploads (stay under Roblox limits)
 MAX_POLL_ATTEMPTS = 30
 POLL_INTERVAL     = 2.0   # seconds between operation polls
+PIXELFIX_TIMEOUT  = 15.0  # seconds before abandoning pixelfix on a single file
 
 # -- History (deduplication) ---------------------------------------------------
 def load_history() -> Dict:
@@ -79,18 +80,14 @@ def file_hash(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-# -- Metadata Extraction -------------------------------------------------------
+# -- Image Analysis ------------------------------------------------------------
 def get_image_comment(image_path: Path) -> Optional[str]:
-    """
-    Attempts to extract metadata comments or descriptions from the image.
-    Works for PNG chunks and JPG EXIF data.
-    """
+    """Attempts to extract metadata comments or descriptions from the image."""
     if not HAS_PILLOW or image_path.suffix.lower() not in {'.png', '.jpg', '.jpeg'}:
         return None
         
     try:
         with Image.open(image_path) as img:
-            # 1. Try PNG Text Infos (tEXt, iTXt, zTXt chunks)
             if hasattr(img, 'text') and img.text:
                 for key in ['Comment', 'Description', 'Title', 'UserComment']:
                     if key in img.text:
@@ -101,14 +98,11 @@ def get_image_comment(image_path: Path) -> Optional[str]:
             if 'Description' in img.info:
                 return str(img.info['Description']).strip()
 
-            # 2. Try JPG EXIF Data
             exif = img.getexif()
             if exif:
-                # 37510 = UserComment, 270 = ImageDescription
                 for tag_id in [37510, 270]:
                     val = exif.get(tag_id)
                     if val:
-                        # Clean up EXIF-Prefixes (like ASCII\0\0\0)
                         if isinstance(val, bytes):
                             val = val.decode('utf-8', errors='ignore')
                         val_str = str(val).replace('ASCII\x00\x00\x00', '').replace('\x00', '').strip()
@@ -118,6 +112,32 @@ def get_image_comment(image_path: Path) -> Optional[str]:
         print(f"  [WARN] Could not read metadata from {image_path.name}: {e}")
         
     return None
+
+def needs_pixelfix(image_path: Path) -> bool:
+    """Checks if the image actually has transparent pixels to avoid useless processing."""
+    if not HAS_PILLOW or image_path.suffix.lower() != '.png':
+        # If we don't have pillow, assume it needs it to be safe
+        return True 
+        
+    try:
+        with Image.open(image_path) as img:
+            # Check if it has an alpha channel or transparency info
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                if img.mode == 'RGBA':
+                    extrema = img.getextrema()
+                    # extrema for RGBA is ((Rmin, Rmax), (Gmin, Gmax), (Bmin, Bmax), (Amin, Amax))
+                    if extrema[3][0] < 255: 
+                        return True # Alpha channel has values below 255 (transparent pixels exist)
+                elif img.mode == 'LA':
+                    extrema = img.getextrema()
+                    if extrema[1][0] < 255:
+                        return True
+                elif img.mode == 'P' and 'transparency' in img.info:
+                    return True
+            return False # No transparency found
+    except Exception:
+        # On error, default to true just in case
+        return True
 
 # -- Pixelfix ------------------------------------------------------------------
 def download_pixelfix():
@@ -147,31 +167,46 @@ def run_pixelfix(image_path: Path, output_path: Optional[Path] = None) -> Path:
             print(f"  [WARN] Pixelfix unavailable. Uploading original.")
             return image_path
 
+    # Smart Check: Does it even need Pixelfix?
+    if not needs_pixelfix(image_path):
+        print(f"  [SKIP] No transparent pixels detected in {image_path.name}. Skipping Pixelfix.")
+        return image_path
+
     if output_path is None:
         output_path = image_path.parent / "pixelfix_out" / image_path.name
     
-    # Ensure the output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. Copy the original file to the output path to prevent overwriting the original file
     try:
         shutil.copy2(image_path, output_path)
     except Exception as e:
         print(f"  [ERROR] Could not copy file for Pixelfix: {e}")
         return image_path
 
-    # 2. Run Pixelfix ONLY on the copied file (Pixelfix overwrites files in-place)
-    result = subprocess.run(
-        [str(PIXELFIX_BIN), str(output_path)],
-        capture_output=True, text=True
-    )
-    
-    # SAFETY CHECK: Did Pixelfix actually succeed?
-    if result.returncode != 0 or not output_path.exists():
-        print(f"  [WARN] Pixelfix failed on {image_path.name}. Uploading original file instead.")
-        # Clean up the corrupted copy if it exists
-        if output_path.exists():
-            output_path.unlink()
+    # Run Pixelfix with a timeout AND AUTOMATIC ENTER KEYPRESS (\n) so it NEVER hangs
+    try:
+        result = subprocess.run(
+            [str(PIXELFIX_BIN), str(output_path)],
+            input="\n",           # <--- Simulates "Press any key"
+            capture_output=True, 
+            text=True,
+            timeout=PIXELFIX_TIMEOUT
+        )
+        
+        if result.returncode != 0 or not output_path.exists():
+            print(f"  [WARN] Pixelfix failed on {image_path.name}. Uploading original file instead.")
+            if output_path.exists():
+                output_path.unlink()
+            return image_path
+
+    except subprocess.TimeoutExpired:
+        print(f"  [WARN] Pixelfix timed out after {PIXELFIX_TIMEOUT}s on {image_path.name}. Uploading original.")
+        # Attempt to clean up the locked/corrupted copy
+        try:
+            if output_path.exists():
+                output_path.unlink()
+        except:
+            pass
         return image_path
 
     return output_path
@@ -310,7 +345,6 @@ def process_and_upload(
 
     name = display_name or image_path.stem.replace("_", " ").replace("-", " ").title()
 
-    # --- Fetch Metadata Comment ---
     extracted_comment = get_image_comment(image_path)
     if extracted_comment:
         description = extracted_comment
@@ -318,7 +352,7 @@ def process_and_upload(
 
     processed = image_path
     if not skip_pixelfix and image_path.suffix.lower() == ".png":
-        print(f"  -> Running Pixelfix...")
+        print(f"  -> Processing image...")
         processed = run_pixelfix(image_path)
 
     if dry_run:
@@ -389,6 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     beh.add_argument("--distribute", action="store_true")
     beh.add_argument("--dry-run", action="store_true")
     beh.add_argument("--delay", type=float, default=RATE_LIMIT_DELAY)
+    beh.add_argument("--start-index", type=int, default=1, help="Start processing at this specific image index") # NEW FEATURE
 
     out = p.add_argument_group("Output")
     out.add_argument("--results", metavar="FILE")
@@ -437,6 +472,8 @@ def main():
     print(f"Creator: {creator_type} {creator_id} | Type: {args.asset_type}")
     print(f"Pixelfix: {'OFF' if args.no_pixelfix else 'ON'} | Dry run: {'YES' if args.dry_run else 'NO'}")
     print(f"Metadata Extract: {'[ON]' if HAS_PILLOW else '[OFF] (pip install Pillow for metadata support)'}")
+    if args.start_index > 1:
+        print(f"Resuming Queue: Starting from index {args.start_index}")
     print("============================================================\n")
 
     tasks: List[Dict] = []
@@ -469,33 +506,56 @@ def main():
 
     results = []
     failed  = []
+    consecutive_errors = 0
+    current_index = args.start_index
 
-    for i, task in enumerate(tasks, 1):
-        path = task["path"]
-        print(f"[{i}/{len(tasks)}] {path.name}")
+    # Wrapper to catch KeyboardInterrupt (Ctrl+C) for graceful exit
+    try:
+        for i, task in enumerate(tasks, 1):
+            if i < args.start_index:
+                continue # Skip files until we hit the start index
 
-        try:
-            record = process_and_upload(
-                image_path   = path,
-                api_key      = args.key,
-                creator_type = creator_type,
-                creator_id   = creator_id,
-                display_name = task["name"],
-                description  = task["description"],
-                skip_pixelfix= args.no_pixelfix,
-                skip_dedup   = args.no_dedup,
-                distribute   = args.distribute,
-                dry_run      = args.dry_run,
-                asset_type   = args.asset_type,
-            )
-            if record:
-                results.append(record)
-        except Exception as e:
-            print(f"  [ERROR] {e}")
-            failed.append({"file": str(path), "error": str(e)})
+            current_index = i
+            path = task["path"]
+            print(f"[{i}/{len(tasks)}] {path.name}")
 
-        if i < len(tasks):
-            time.sleep(args.delay)
+            try:
+                record = process_and_upload(
+                    image_path   = path,
+                    api_key      = args.key,
+                    creator_type = creator_type,
+                    creator_id   = creator_id,
+                    display_name = task["name"],
+                    description  = task["description"],
+                    skip_pixelfix= args.no_pixelfix,
+                    skip_dedup   = args.no_dedup,
+                    distribute   = args.distribute,
+                    dry_run      = args.dry_run,
+                    asset_type   = args.asset_type,
+                )
+                if record:
+                    results.append(record)
+                
+                # Reset error counter on success
+                consecutive_errors = 0 
+                
+            except Exception as e:
+                print(f"  [ERROR] {e}")
+                failed.append({"file": str(path), "error": str(e), "index": i})
+                consecutive_errors += 1
+
+                # Auto-stop if the internet goes down or API is completely broken
+                if consecutive_errors >= 3:
+                    print(f"\n[CRITICAL] 3 consecutive errors detected. Stopping run to save progress.")
+                    print(f"Please check your internet connection or Roblox API status.")
+                    break
+
+            if i < len(tasks):
+                time.sleep(args.delay)
+
+    except KeyboardInterrupt:
+        print(f"\n\n[INFO] Upload manually paused by user (Ctrl+C).")
+        # Do not exit immediately, let it proceed to summary and saving!
 
     print(f"\n{'='*60}")
     print("UPLOAD SUMMARY")
@@ -513,6 +573,13 @@ def main():
         
     print(f"{'='*60}")
     print(f"Done: {len(results)} uploaded, {len(failed)} failed.")
+
+    # Show the resume command if the script didn't finish the whole queue
+    if current_index < len(tasks) or consecutive_errors >= 3:
+        next_index = current_index if consecutive_errors >= 3 else current_index + 1
+        print(f"\n[RESUME INFO] The queue was not fully completed.")
+        print(f"To resume where you left off, add this parameter on your next run:")
+        print(f"  --start-index {next_index}")
 
     if args.results:
         out = {"uploaded": results, "failed": failed}
