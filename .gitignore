@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+upload_history.json
+tools/TransparentPixelFix.exe
+pixelfix_out/
